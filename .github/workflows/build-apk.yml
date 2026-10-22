@@ -1,0 +1,148 @@
+name: build-apk
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.24.3
+          cache: true
+
+      - name: Regenerate clean Android skeleton
+        run: |
+          set -e
+          # android/ 不入库：由 CI 生成与 Flutter 3.24.3 完全匹配的 v2 embedding 骨架，
+          # 避免残缺 Gradle 工程报 "deleted Android v1 embedding" 或构建出空包。
+          # 生成前后把仓库自带的 lib/ 与 pubspec.yaml 还原，防止 flutter create 覆盖我们的
+          # 入口文件与依赖声明（test/widget_test.dart 会被重新生成，直接删掉）。
+          rm -rf android
+          cp -r lib lib.bak
+          cp pubspec.yaml pubspec.yaml.bak
+          flutter create --platforms=android --org com.moyu --project-name desktop_spirit .
+          rm -rf lib && mv lib.bak lib
+          mv pubspec.yaml.bak pubspec.yaml
+          rm -f test/widget_test.dart
+          cp ci/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          grep -q "overlayMain" lib/main.dart
+          echo "=== applicationId / namespace ==="
+          grep -rE "applicationId|namespace" android/app/build.gradle*
+          echo "=== 悬浮窗服务与权限标记 ==="
+          grep -E "OverlayService|specialUse|SYSTEM_ALERT_WINDOW" android/app/src/main/AndroidManifest.xml
+          echo "=== 确认无无障碍声明（1.0.0 已剔除吃桌面图标功能）==="
+          if grep -qE "AccessibilityService|BIND_ACCESSIBILITY" android/app/src/main/AndroidManifest.xml; then
+            echo "::error::Manifest 里仍有无障碍服务声明"
+            exit 1
+          fi
+          echo "OK 无无障碍声明"
+
+      - name: Resolve packages
+        run: |
+          flutter clean
+          flutter pub get
+
+      - name: Generate asset directory declarations (PNG + WAV)
+        run: |
+          set -e
+          # "- assets/" 不递归子目录，而素材都在 assets/<动作>/ 与 assets/sfx/ 下，
+          # 必须逐目录声明，否则 AssetManifest 为空、0 张图 0 个音效入包。
+          python3 ci/gen_assets.py
+          flutter pub get
+          echo "==== pubspec flutter section ===="
+          sed -n '/^flutter:/,$p' pubspec.yaml
+          grep -q "assets/sfx/" pubspec.yaml
+
+      - name: Static analysis and smoke tests
+        run: |
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
+
+      - name: Verify debug bundle (Dart compiled + 58 PNG + 4 WAV)
+        run: |
+          set -e
+          flutter build bundle --debug
+          test -s build/flutter_assets/kernel_blob.bin && echo "OK kernel_blob.bin present"
+          PNG=$(find build/flutter_assets/assets -type f -name '*.png' | wc -l | tr -d ' ')
+          WAV=$(find build/flutter_assets/assets -type f -name '*.wav' | wc -l | tr -d ' ')
+          echo "bundle: png=$PNG wav=$WAV"
+          test "$PNG" -eq 58
+          test "$WAV" -eq 4
+          grep -q "egg_01" build/flutter_assets/AssetManifest.json
+          echo "OK AssetManifest 非空且可索引蛋帧"
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Verify APK contents
+        run: |
+          set -e
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          ls -la "$APK"
+          unzip -l "$APK" > /tmp/apk.txt
+
+          # 1) release 下 Dart 走 AOT，必须有 libapp.so，否则就是空壳
+          grep -q "libapp.so" /tmp/apk.txt && echo "OK libapp.so (AOT) present"
+
+          # 2) flutter_assets 里 58 张序列帧 + 4 个音效必须在
+          PNG=$(grep -cE "flutter_assets/assets/.*\.png" /tmp/apk.txt || true)
+          WAV=$(grep -cE "flutter_assets/assets/.*\.wav" /tmp/apk.txt || true)
+          echo "APK: png=$PNG wav=$WAV"
+          test "$PNG" -eq 58
+          test "$WAV" -eq 4
+          grep -q "egg_01" /tmp/apk.txt && echo "OK 蛋帧已打包"
+          grep -q "sfx_hatch.wav" /tmp/apk.txt && echo "OK 音效已打包"
+
+          # 3) 悬浮窗 Service 真实类必须打进 dex。
+          #    曾把类名误写成 id.flutter.*，R8 按错误引用裁掉真实类，表现为悬浮窗起不来。
+          rm -rf /tmp/dex && mkdir -p /tmp/dex
+          ( cd /tmp/dex && unzip -oq "$GITHUB_WORKSPACE/$APK" 'classes*.dex' )
+          if cat /tmp/dex/classes*.dex | strings | grep -q "flutter/overlay/window/flutter_overlay_window/OverlayService"; then
+            echo "OK OverlayService class present in dex"
+          else
+            echo "::error::OverlayService class missing from dex"
+            exit 1
+          fi
+
+          # 4) 合并后的 Manifest 必须带 Android 14 的 specialUse 前台服务类型
+          if grep -rls "PROPERTY_SPECIAL_USE_FGS_SUBTYPE" build/app/intermediates --include=AndroidManifest.xml | grep -q .; then
+            echo "OK foregroundServiceType=specialUse merged"
+          else
+            echo "::error::specialUse foreground service type not found in merged manifest"
+            exit 1
+          fi
+
+          # 5) 完全离线 + 无无障碍：权限与 dex 里都不该出现 INTERNET / AccessibilityService
+          unzip -p "$APK" AndroidManifest.xml > /tmp/am.bin
+          if strings /tmp/am.bin | grep -q "android.permission.INTERNET"; then
+            echo "::error::APK 声明了 INTERNET 权限，与「完全离线」不符"
+            exit 1
+          fi
+          echo "OK 无 INTERNET 权限（完全离线）"
+          if strings /tmp/am.bin | grep -qE "AccessibilityService|BIND_ACCESSIBILITY"; then
+            echo "::error::APK 里仍有无障碍服务痕迹（吃图标功能应已剔除）"
+            exit 1
+          fi
+          if cat /tmp/dex/classes*.dex | strings | grep -q "SpiritAccessibilityService"; then
+            echo "::error::dex 里仍有吃图标无障碍服务类"
+            exit 1
+          fi
+          echo "OK 无无障碍服务痕迹（吃图标功能已剔除）"
+
+          echo "===== APK 校验通过：非空壳、素材齐备、悬浮窗服务已接好、离线无多余权限 ====="
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-spirit-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

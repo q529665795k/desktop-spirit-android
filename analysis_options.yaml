@@ -1,0 +1,9 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # 桌面宠物工程：素材目录名与常量命名以可读优先，不因此报错
+    constant_identifier_names: ignore
+  exclude:
+    - packages/**
+    - _old_ref/**

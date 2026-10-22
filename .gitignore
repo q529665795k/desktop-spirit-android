@@ -1,0 +1,29 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+
+# Android（android/ 由 CI 用 flutter create 生成，不入库）
+/android/
+*.apk
+*.aab
+*.jks
+*.keystore
+local.properties
+
+# 工程内临时产物
+__pycache__/
+*.pyc
+
+# 重写参考用的旧工程快照（仅本地对照，不入库）
+_old_ref/
