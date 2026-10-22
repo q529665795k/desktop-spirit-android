@@ -34,6 +34,8 @@
 
 去 [Actions](../../actions/workflows/build-apk.yml) 找最近一次成功的 `build-apk` 运行，在页面底部 **Artifacts** 下载 `desktop-spirit-android-apk`，解压得到 `app-release.apk`，传到手机安装即可。
 
+> CI 产出的 APK 使用 Android **debug 密钥**签名（Flutter 未配 `signingConfig` 时的默认行为）。自己装机、发给朋友都没问题；若要上应用商店、或想让后续版本覆盖安装旧版本，请自备 release 密钥（`android/key.properties` + `signingConfig`）再构建。
+
 首次开启悬浮窗需要授权：
 
 1. 点「授权并开启悬浮窗」→ 跳转系统设置；
@@ -88,7 +90,6 @@ assets/
 ci/
   AndroidManifest.xml    固化清单（CI 覆盖用）
   gen_assets.py          逐目录声明素材，同时识别 PNG 与 WAV
-_old_ref/                旧项目参考（旧 main.dart、功能与素材盘点、CI 清单）
 ```
 
 ## 素材说明
