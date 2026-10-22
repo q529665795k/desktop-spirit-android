@@ -6,8 +6,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- 刻意不声明 android.permission.INTERNET：桌面灵宠完全离线，不联网、不上传、不要账号。
-         1.0.0 已移除旧版的「吃桌面图标」无障碍服务（BIND_ACCESSIBILITY_SERVICE 权限与
-         SpiritAccessibilityService 声明），本应用不需要任何无障碍权限。 -->
+         1.0.0 已移除旧版的「吃桌面图标」功能：无障碍服务、其权限声明与相关开关全部删除，
+         本应用不需要任何无障碍授权。 -->
 
     <application
         android:label="桌面灵宠"

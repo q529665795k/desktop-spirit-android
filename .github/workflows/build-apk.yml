@@ -41,7 +41,14 @@ jobs:
           echo "=== 悬浮窗服务与权限标记 ==="
           grep -E "OverlayService|specialUse|SYSTEM_ALERT_WINDOW" android/app/src/main/AndroidManifest.xml
           echo "=== 确认无无障碍声明（1.0.0 已剔除吃桌面图标功能）==="
-          if grep -qE "AccessibilityService|BIND_ACCESSIBILITY" android/app/src/main/AndroidManifest.xml; then
+          # 必须先剥掉 XML 注释再判定：注释里写到权限名就误报过一次，白白烧一轮构建
+          python3 - <<'PY'
+          import re
+          s = open('android/app/src/main/AndroidManifest.xml', encoding='utf-8').read()
+          s = re.sub(r'<!--.*?-->', '', s, flags=re.S)
+          open('/tmp/am_clean.xml', 'w', encoding='utf-8').write(s)
+          PY
+          if grep -qE "AccessibilityService|BIND_ACCESSIBILITY|accessibility-service" /tmp/am_clean.xml; then
             echo "::error::Manifest 里仍有无障碍服务声明"
             exit 1
           fi
