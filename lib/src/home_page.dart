@@ -363,6 +363,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!SpiritState.evo && SpiritState.feedCount >= 10) {
       setState(() => SpiritState.evo = true);
       await SpiritState.save();
+      if (!mounted) return;
       SpiritSfx.play('evolve');
       _showEggBubble('✨ 进化啦！完全体形态 ✨', seconds: 4);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -406,7 +407,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('$kAppName · $kVersion'),
+        title: const Text('$kAppName · $kVersion'),
         content: const Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -541,7 +542,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(kAppName),
+        title: const Text(kAppName),
         centerTitle: true,
       ),
       body: Center(

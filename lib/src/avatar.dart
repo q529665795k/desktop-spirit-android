@@ -22,13 +22,9 @@ class SpriteAnim extends StatefulWidget {
   final double fps;
   final BoxFit fit;
 
-  @override
-  State<SpriteAnim> createState() => _SpriteAnimState();
-}
-
-class _SpriteAnimState extends State<SpriteAnim>
-    with SingleTickerProviderStateMixin {
-  /// 每组动作素材的帧数（与 assets/ 下的 png 数量严格一致）
+  /// 每组动作素材的帧数（与 assets/ 下的 png 数量严格一致）。
+  ///
+  /// 挂在本组件上（而不是 State 上），方便缩略图、测试与生成脚本统一引用同一份口径。
   static const Map<String, int> kFrameCounts = {
     'egg': 3,
     'idle': 5,
@@ -44,6 +40,12 @@ class _SpriteAnimState extends State<SpriteAnim>
     'final': 5,
   };
 
+  @override
+  State<SpriteAnim> createState() => _SpriteAnimState();
+}
+
+class _SpriteAnimState extends State<SpriteAnim>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _c;
   int _idx = 0;
   late int _frames;
@@ -51,7 +53,7 @@ class _SpriteAnimState extends State<SpriteAnim>
   @override
   void initState() {
     super.initState();
-    _frames = kFrameCounts[widget.dir] ?? 1;
+    _frames = SpriteAnim.kFrameCounts[widget.dir] ?? 1;
     _c = AnimationController(vsync: this, duration: _durationFor());
     _c.addListener(() {
       final idx = (_c.value * _frames).floor() % _frames;
@@ -70,7 +72,7 @@ class _SpriteAnimState extends State<SpriteAnim>
   void didUpdateWidget(covariant SpriteAnim oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.dir != widget.dir || oldWidget.fps != widget.fps) {
-      _frames = kFrameCounts[widget.dir] ?? 1;
+      _frames = SpriteAnim.kFrameCounts[widget.dir] ?? 1;
       _c.duration = _durationFor();
       _c.value = 0;
       setState(() => _idx = 0);

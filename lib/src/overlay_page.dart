@@ -188,7 +188,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     if (mounted) {
       setState(() {
         _action = dir;
-        if (match != null) _expr = match!;
+        if (match != null) _expr = match;
       });
     }
     _actionTimer = Timer(Duration(milliseconds: ms), () {
@@ -383,7 +383,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _winH = _bigH;
     if (_screenW > 0) {
       final left =
-          (_screenW / 2 - _bigW / 2).clamp(5.0, math.max(5.0, _screenW - _bigW - 5));
+          (_screenW / 2 - _bigW / 2)
+              .clamp(5.0, math.max(5.0, _screenW - _bigW - 5))
+              .toDouble();
       _roamX = left;
       await _moveTo(left, math.max(40.0, _roamY));
     }
@@ -566,7 +568,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
 
   void _onEggPoke() {
     _touchAndReset();
-    final lines = HatchChatter.idleLines;
+    const lines = HatchChatter.idleLines;
     final line = lines[_randomInt(lines.length)];
     _showBubble(line, const Duration(seconds: 3));
     SpiritTts.speak(line);
@@ -585,11 +587,6 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _panelTimer = Timer(const Duration(seconds: 4), () {
       if (mounted) setState(() => _panelOpen = false);
     });
-  }
-
-  void _closePanel() {
-    _panelTimer?.cancel();
-    if (mounted) setState(() => _panelOpen = false);
   }
 
   // ===== 复用组件 =====
