@@ -16,6 +16,7 @@ class Expression {
     this.badge, {
     this.tint,
     this.line,
+    this.badgeAsset,
   });
 
   /// 内部 id
@@ -35,14 +36,19 @@ class Expression {
 
   /// 可选台词（自动切换表情时可能一起说）
   final String? line;
+
+  /// 可选徽标贴片（assets/items 下的 PNG）；非空时徽标用图片而不是 emoji。
+  final String? badgeAsset;
 }
 
 /// 14 种表情状态：9 种动作帧的原生表情 + 5 种派生情绪（同帧不同徽标/色偏）。
 const List<Expression> kExpressions = [
   Expression('idle', '发呆', 'idle', '😊'),
   Expression('happy', '开心', 'happy', '🥰'),
-  Expression('hungry', '饿了', 'hungry', '🍽️'),
-  Expression('sleep', '困了', 'sleep', '💤'),
+  Expression('hungry', '饿了', 'hungry', '🍽️',
+      badgeAsset: 'assets/items/item_hungry.png'),
+  Expression('sleep', '困了', 'sleep', '💤',
+      badgeAsset: 'assets/items/item_zzz.png'),
   Expression('angry', '生气', 'angry', '💢'),
   Expression('dance', '起舞', 'dance', '🎵'),
   Expression('roll', '打滚', 'roll', '🌀'),

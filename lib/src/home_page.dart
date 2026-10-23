@@ -35,6 +35,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _autoHideDelay = 20;
   double _ttsRate = 0.5;
   String _ttsVoice = 'female';
+  bool _ttsEnabled = true;
   bool _roamEnabled = true;
   bool _sfxEnabled = true;
   bool _showClock = true;
@@ -108,12 +109,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _autoHideDelay = SpiritConfig.autoHideDelay;
         _ttsRate = SpiritConfig.ttsRate;
         _ttsVoice = SpiritConfig.ttsVoice;
+        _ttsEnabled = SpiritConfig.ttsEnabled;
         _roamEnabled = SpiritConfig.roamEnabled;
         _sfxEnabled = SpiritConfig.sfxEnabled;
         _showClock = SpiritConfig.showClock;
         _skinId = SpiritConfig.skinId;
         _customAvatarPath = SpiritConfig.customAvatarPath;
       });
+    });
+    // 启动就预热语音引擎：状态行能立刻反映引擎可用性（Android 11+ 少声明
+    // TTS_SERVICE 可见性时引擎会静默起不来），第一句台词也不会因冷启动被吞。
+    SpiritTts.ensure().then((_) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -255,6 +262,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => _autoHideDelay = v.round());
   }
 
+  /// 语音设置改动后同步给悬浮窗引擎，并让它在桌面直接出一次声，
+  /// 这样「切换男女声」立刻能听到结果，不用猜有没有生效。
+  Future<void> _pushTtsSettings() async {
+    try {
+      await FlutterOverlayWindow.shareData(jsonEncode({
+        'ttsEnabled': SpiritConfig.ttsEnabled,
+        'ttsVoice': SpiritConfig.ttsVoice,
+        'ttsRate': SpiritConfig.ttsRate,
+      }));
+    } catch (_) {}
+  }
+
   Future<void> _updateTtsRate(double v) async {
     SpiritConfig.ttsRate = v;
     await SpiritConfig.save();
@@ -267,8 +286,59 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     SpiritConfig.ttsVoice = v;
     await SpiritConfig.save();
     await SpiritTts.refresh();
+    await _pushTtsSettings();
     if (!mounted) return;
     setState(() => _ttsVoice = v);
+    // 只有「引擎正常、也扫到了中文声线，但没有性别标记」时才提示，
+    // 引擎本身没起来的情况下面那行状态说明已经写清楚了。
+    if (v != 'default' &&
+        SpiritTts.ready &&
+        SpiritTts.zhVoiceCount > 0 &&
+        !SpiritTts.hasGenderedVoice) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '系统语音包里没有${v == 'male' ? '男声' : '女声'}，已改用音调区分；'
+            '想要更自然：设置 → 语音合成 → 安装/更新中文语音数据',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  Future<void> _updateTtsEnabled(bool v) async {
+    SpiritConfig.ttsEnabled = v;
+    await SpiritConfig.save();
+    await _pushTtsSettings();
+    if (!mounted) return;
+    setState(() => _ttsEnabled = v);
+    if (v) {
+      await SpiritTts.refresh();
+      await SpiritTts.speak('语音播报打开啦');
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// 试听：直接走真实的朗读路径，顺便把引擎诊断信息刷出来。
+  Future<void> _previewVoice() async {
+    await SpiritTts.speak('主人，我是小狐耳，这是我的新声音');
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  /// 语音设置卡片底下那行状态：把「为什么不出声」直接摆在用户面前。
+  String _ttsStatusText() {
+    if (!_ttsEnabled) return '语音播报已关闭：台词只显示气泡文字，不出声';
+    if (!SpiritTts.ready) return '语音引擎准备中…';
+    if (SpiritTts.diagnostic.isNotEmpty) return '⚠️ ${SpiritTts.diagnostic}';
+    if (SpiritTts.zhVoiceCount == 0) {
+      return '⚠️ 系统里没扫到中文语音包，可能读不出声：设置 → 语音合成 → 安装中文语音数据';
+    }
+    final voice = SpiritTts.hasGenderedVoice
+        ? '已找到性别声线'
+        : '无性别声线，用音调区分男女';
+    return '引擎就绪 · 中文声线 ${SpiritTts.zhVoiceCount} 个 · $voice';
   }
 
   Future<void> _updateRoam(bool v) async {
@@ -463,7 +533,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             Text('🌱 成长：${SpiritState.growthStageName}',
                 style: TextStyle(fontSize: 12, color: stageColor)),
             const SizedBox(width: 10),
-            Text('💕 亲密度 ${SpiritState.affinity}',
+            Image.asset('assets/items/item_heart.png',
+                width: 13,
+                height: 13,
+                fit: BoxFit.contain,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+            const SizedBox(width: 3),
+            Text('亲密度 ${SpiritState.affinity}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('🍼 喂食 ${SpiritState.feedCount} 次',
+                style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(width: 10),
+            Text('💕 已互动 ${SpiritState.interactCount} 次',
                 style: const TextStyle(fontSize: 12, color: Colors.grey)),
           ],
         ),
@@ -488,7 +576,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: FilledButton.tonal(
               onPressed: () => _feed(f),
-              child: Text('${f.emoji} ${f.name}'),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Image.asset(
+                    f.icon,
+                    width: 18,
+                    height: 18,
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                    errorBuilder: (_, __, ___) =>
+                        Text(f.emoji, style: const TextStyle(fontSize: 14)),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(f.name),
+                ],
+              ),
             ),
           ),
       ],
@@ -679,6 +782,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 icon: Icons.record_voice_over,
                 title: '语音设置',
                 children: [
+                  _labelRow(
+                    '语音播报（说台词时读出来）',
+                    Switch(value: _ttsEnabled, onChanged: _updateTtsEnabled),
+                  ),
+                  const SizedBox(height: 2),
                   Row(
                     children: [
                       const Text('语速', style: TextStyle(fontSize: 13)),
@@ -692,6 +800,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               ? '慢'
                               : (_ttsRate < 0.8 ? '标准' : '快'),
                           onChanged: _updateTtsRate,
+                          onChangeEnd: (_) => _pushTtsSettings(),
                         ),
                       ),
                       Text(_ttsRate < 0.45 ? '慢' : (_ttsRate < 0.8 ? '标准' : '快'),
@@ -699,27 +808,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               fontSize: 12, color: Colors.grey)),
                     ],
                   ),
-                  _labelRow(
-                    '声音',
-                    SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(value: 'female', label: Text('女声')),
-                        ButtonSegment(value: 'male', label: Text('男声')),
-                        ButtonSegment(value: 'default', label: Text('默认')),
-                      ],
-                      selected: {_ttsVoice},
-                      onSelectionChanged: (s) => _updateTtsVoice(s.first),
-                      showSelectedIcon: false,
-                    ),
+                  const Text('声音', style: TextStyle(fontSize: 13)),
+                  const SizedBox(height: 6),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'female', label: Text('女声')),
+                      ButtonSegment(value: 'male', label: Text('男声')),
+                      ButtonSegment(value: 'default', label: Text('默认')),
+                    ],
+                    selected: {_ttsVoice},
+                    onSelectionChanged: (s) => _updateTtsVoice(s.first),
+                    showSelectedIcon: false,
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   Align(
                     alignment: Alignment.centerRight,
                     child: TextButton.icon(
-                      onPressed: () => SpiritTts.speak('主人，我是小狐耳，这是我的新声音'),
+                      onPressed: _ttsEnabled ? _previewVoice : null,
                       icon: const Icon(Icons.volume_up, size: 16),
                       label: const Text('试听一下'),
                     ),
+                  ),
+                  Text(
+                    _ttsStatusText(),
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                 ],
               ),
@@ -819,13 +931,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     Switch(value: _sfxEnabled, onChanged: _updateSfx),
                   ),
                   if (_sfxEnabled)
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        onPressed: () => SpiritSfx.play('hatch'),
-                        icon: const Icon(Icons.play_arrow, size: 16),
-                        label: const Text('试听破壳音'),
-                      ),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 0,
+                      alignment: WrapAlignment.end,
+                      children: [
+                        for (final s in const [
+                          ['hatch', '破壳'],
+                          ['evolve', '进化'],
+                          ['pet', '摸头'],
+                          ['feed', '干饭'],
+                          ['hungry', '喊饿'],
+                          ['sleep', '入睡'],
+                        ])
+                          TextButton.icon(
+                            onPressed: () => SpiritSfx.play(s[0]),
+                            icon: const Icon(Icons.play_arrow, size: 16),
+                            label: Text('试听${s[1]}音',
+                                style: const TextStyle(fontSize: 12)),
+                          ),
+                      ],
                     ),
                 ],
               ),

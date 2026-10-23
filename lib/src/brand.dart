@@ -82,7 +82,7 @@ const List<String> kCareLines = [
 
 /// 食物定义（喂食面板与主页共用）
 class Food {
-  const Food(this.emoji, this.name, this.satiety, this.mood);
+  const Food(this.emoji, this.name, this.satiety, this.mood, {required this.icon});
 
   final String emoji;
   final String name;
@@ -92,10 +92,19 @@ class Food {
 
   /// 提升的心情
   final int mood;
+
+  /// 道具贴片（assets/items 下的 PNG），喂食按钮与状态条复用，避免打包了却不引用。
+  final String icon;
 }
 
 const List<Food> kFoods = [
-  Food('🍎', '苹果', 25, 5),
-  Food('🐟', '小鱼干', 35, 8),
-  Food('🍬', '糖果', 15, 3),
+  Food('🍎', '苹果', 25, 5, icon: 'assets/items/item_apple.png'),
+  Food('🐟', '小鱼干', 35, 8, icon: 'assets/items/item_fish.png'),
+  Food('🍬', '糖果', 15, 3, icon: 'assets/items/item_candy.png'),
 ];
+
+/// 「摸摸」按钮与亲密度状态条共用的爱心贴片
+const String kHeartIconAsset = 'assets/items/item_heart.png';
+
+/// 「摸摸」按钮图标贴片（与爱心贴片同源）
+const String kPetIconAsset = kHeartIconAsset;

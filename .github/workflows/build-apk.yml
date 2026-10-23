@@ -53,6 +53,14 @@ jobs:
             exit 1
           fi
           echo "OK 无无障碍声明"
+          echo "=== 确认已声明 TTS 引擎可见性（Android 11+ 语音必需）==="
+          # 缺这条 query 时 TextToSpeech 解析不到引擎，语音全程无声且不报错，必须卡在构建期
+          if grep -q "android.intent.action.TTS_SERVICE" /tmp/am_clean.xml; then
+            echo "OK TTS_SERVICE query present"
+          else
+            echo "::error::Manifest 缺少 TTS_SERVICE query，Android 11+ 语音会全程无声"
+            exit 1
+          fi
 
       - name: Resolve packages
         run: |
@@ -75,7 +83,7 @@ jobs:
           flutter analyze --no-fatal-infos --no-fatal-warnings
           flutter test
 
-      - name: Verify debug bundle (Dart compiled + 58 PNG + 4 WAV)
+      - name: Verify debug bundle (Dart compiled + 58 PNG + 7 WAV)
         run: |
           set -e
           flutter build bundle --debug
@@ -84,9 +92,10 @@ jobs:
           WAV=$(find build/flutter_assets/assets -type f -name '*.wav' | wc -l | tr -d ' ')
           echo "bundle: png=$PNG wav=$WAV"
           test "$PNG" -eq 58
-          test "$WAV" -eq 4
+          test "$WAV" -eq 7
           grep -q "egg_01" build/flutter_assets/AssetManifest.json
-          echo "OK AssetManifest 非空且可索引蛋帧"
+          grep -q "sfx_pet" build/flutter_assets/AssetManifest.json
+          echo "OK AssetManifest 非空且可索引蛋帧与新增音效"
 
       - name: Build release APK
         run: flutter build apk --release
@@ -101,14 +110,15 @@ jobs:
           # 1) release 下 Dart 走 AOT，必须有 libapp.so，否则就是空壳
           grep -q "libapp.so" /tmp/apk.txt && echo "OK libapp.so (AOT) present"
 
-          # 2) flutter_assets 里 58 张序列帧 + 4 个音效必须在
+          # 2) flutter_assets 里 58 张序列帧 + 7 个音效必须在
           PNG=$(grep -cE "flutter_assets/assets/.*\.png" /tmp/apk.txt || true)
           WAV=$(grep -cE "flutter_assets/assets/.*\.wav" /tmp/apk.txt || true)
           echo "APK: png=$PNG wav=$WAV"
           test "$PNG" -eq 58
-          test "$WAV" -eq 4
+          test "$WAV" -eq 7
           grep -q "egg_01" /tmp/apk.txt && echo "OK 蛋帧已打包"
           grep -q "sfx_hatch.wav" /tmp/apk.txt && echo "OK 音效已打包"
+          grep -q "sfx_pet.wav" /tmp/apk.txt && echo "OK 新增音效已打包"
 
           # 3) 悬浮窗 Service 真实类必须打进 dex。
           #    曾把类名误写成 id.flutter.*，R8 按错误引用裁掉真实类，表现为悬浮窗起不来。
@@ -129,8 +139,22 @@ jobs:
             exit 1
           fi
 
+          # 4b) 语音必需：合并清单里必须保留 TTS 引擎可见性声明（Android 11+ 行为）
+          if grep -rls "android.intent.action.TTS_SERVICE" build/app/intermediates --include=AndroidManifest.xml | grep -q .; then
+            echo "OK TTS_SERVICE query merged"
+          else
+            echo "::error::合并清单缺少 TTS_SERVICE query（语音会静默失效）"
+            exit 1
+          fi
+
           # 5) 完全离线 + 无无障碍：权限与 dex 里都不该出现 INTERNET / AccessibilityService
           unzip -p "$APK" AndroidManifest.xml > /tmp/am.bin
+          if strings /tmp/am.bin | grep -q "android.intent.action.TTS_SERVICE"; then
+            echo "OK APK 清单含 TTS 引擎可见性声明"
+          else
+            echo "::error::APK 清单缺少 TTS_SERVICE query，装到 Android 11+ 会没有声音"
+            exit 1
+          fi
           if strings /tmp/am.bin | grep -q "android.permission.INTERNET"; then
             echo "::error::APK 声明了 INTERNET 权限，与「完全离线」不符"
             exit 1

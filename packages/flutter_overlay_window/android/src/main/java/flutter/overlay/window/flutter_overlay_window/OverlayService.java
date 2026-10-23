@@ -158,9 +158,18 @@ public class OverlayService extends Service implements View.OnTouchListener {
         }
         int dx = startX == OverlayConstants.DEFAULT_XY ? 0 : startX;
         int dy = startY == OverlayConstants.DEFAULT_XY ? -statusBarHeightPx() : startY;
+        // desktop-spirit 定制：Dart 侧传进来的 width/height 是 dp，而这里原先直接当像素用，
+        // 结果 200x240 在 2.75 倍屏上只剩约 73x87 dp，形象被压到底边、文字没有排布空间。
+        // 统一按 dp -> px 换算，与 resizeOverlay / moveOverlay 保持一致。
+        int winWidth = WindowSetup.width == -1999
+                ? -1
+                : (WindowSetup.width > 0 ? dpToPx(WindowSetup.width) : WindowSetup.width);
+        int winHeight = WindowSetup.height == -1999
+                ? screenHeight()
+                : (WindowSetup.height > 0 ? dpToPx(WindowSetup.height) : WindowSetup.height);
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowSetup.width == -1999 ? -1 : WindowSetup.width,
-                WindowSetup.height != -1999 ? WindowSetup.height : screenHeight(),
+                winWidth,
+                winHeight,
                 0,
                 -statusBarHeightPx(),
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE,
@@ -244,7 +253,8 @@ public class OverlayService extends Service implements View.OnTouchListener {
         if (windowManager != null) {
             WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
             params.width = (width == -1999 || width == -1) ? -1 : dpToPx(width);
-            params.height = (height != 1999 || height != -1) ? dpToPx(height) : height;
+            // 原写法 (height != 1999 || height != -1) 恒为 true，且哨兵值比对写反，这里一并纠正
+            params.height = (height == -1999 || height == -1) ? -1 : dpToPx(height);
             WindowSetup.enableDrag = enableDrag;
             windowManager.updateViewLayout(flutterView, params);
             result.success(true);

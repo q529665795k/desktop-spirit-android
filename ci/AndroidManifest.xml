@@ -5,8 +5,18 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Android 11+（targetSdk ≥ 30）有包可见性限制：不在这里声明 TTS_SERVICE，
+         系统解析「默认语音引擎」时只能拿到空结果，TextToSpeech 初始化直接失败。
+         flutter_tts 的 README 明确要求接入方声明这一条；漏掉它的症状就是
+         「语音设置能点、选择能存、试听与说话一点声音都没有，且不报任何错」。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <!-- 刻意不声明 android.permission.INTERNET：桌面灵宠完全离线，不联网、不上传、不要账号。
-         1.0.0 已移除旧版的「吃桌面图标」功能：无障碍服务、其权限声明与相关开关全部删除，
+         1.0.0 起已移除旧版的「吃桌面图标」功能：无障碍服务、其权限声明与相关开关全部删除，
          本应用不需要任何无障碍授权。 -->
 
     <application

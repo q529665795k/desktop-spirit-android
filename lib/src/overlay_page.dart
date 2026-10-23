@@ -81,6 +81,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
   /// 缩头方向：-1 贴左 / 1 贴右；0 表示当前在大窗
   int _edge = 0;
 
+  /// 上次因主 App 改语音设置而回一句的时间（节流，避免拖语速滑杆时刷屏）
+  DateTime? _lastTtsEcho;
+
   String _clock = '';
   String _date = '';
 
@@ -99,6 +102,8 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     final ph = await SpiritStore.load();
     await SpiritState.load();
     await SpiritConfig.load();
+    // 预热 TTS 引擎：设了 8 秒超时，起不来也不会拖住界面，失败原因留给设置页显示。
+    SpiritTts.ensure();
     if (!mounted) return;
     setState(() {
       _phase = ph;
@@ -109,6 +114,10 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _winW = _bigW;
     _winH = _bigH;
     await _syncScreenSize();
+    // 原生首次建窗时把 Dart 传来的 200/240 直接当物理像素用（插件历史行为），
+    // 在 2.75 倍屏上逻辑尺寸只剩约 73×87dp：形象被压到底边、气泡没有排布空间。
+    // 引擎就绪后主动 resizeOverlay 一次校正到 dp 规格（原生 resize 通道会做 dp→px）。
+    await _applyWindowSize(_bigW, _bigH);
     _startSleepWatch();
     _decayTimer = Timer.periodic(const Duration(seconds: 30), (_) => _onDecay());
     _boredTimer = Timer.periodic(const Duration(seconds: 60), (_) => _onBored());
@@ -118,6 +127,15 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _clockTimer = Timer.periodic(const Duration(seconds: 30), (_) => _onClockTick());
     _startHatchChatter();
     _resetAutoHide();
+    // 开窗先亮一句：悬浮态下文字必须能看见（蛋形态由 HatchChatter 的开场台词负责）
+    if (_phase == SpiritPhase.spirit) {
+      Timer(const Duration(milliseconds: 900), () {
+        if (mounted) {
+          _showBubble('点我摸摸头 · 双击吐槽 · 长按喂食',
+              const Duration(seconds: 6));
+        }
+      });
+    }
   }
 
   Future<void> _syncScreenSize() async {
@@ -130,6 +148,15 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
         _roamX = math.max(8.0, _screenW / 2 - _winW / 2);
       }
     } catch (_) {}
+  }
+
+  /// 校正悬浮窗尺寸：原生 resize 通道按 dp→px 换算，与下方所有 dp 常量一致。
+  Future<void> _applyWindowSize(double w, double h) async {
+    try {
+      await FlutterOverlayWindow.resizeOverlay(w.toInt(), h.toInt(), true);
+    } catch (_) {}
+    _winW = w;
+    _winH = h;
   }
 
   /// 把「窗口绝对左/上缘（dp）」换算成 gravity=CENTER 下的偏移并移动
@@ -227,6 +254,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     bool? hatchComplete;
     bool? showClock;
     String? skin;
+    bool? ttsEnabled;
+    String? ttsVoice;
+    double? ttsRate;
     try {
       dynamic m = event;
       if (event is String) m = jsonDecode(event);
@@ -238,6 +268,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
         if (m['hatchComplete'] == true) hatchComplete = true;
         if (m.containsKey('showClock')) showClock = m['showClock'] == true;
         skin = m['skin'] as String?;
+        if (m.containsKey('ttsEnabled')) ttsEnabled = m['ttsEnabled'] == true;
+        ttsVoice = m['ttsVoice'] as String?;
+        ttsRate = (m['ttsRate'] as num?)?.toDouble();
       }
     } catch (_) {}
 
@@ -246,6 +279,30 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     }
     if (showClock != null) SpiritConfig.showClock = showClock;
     if (skin != null) SpiritConfig.skinId = skin;
+    // 语音设置改动：悬浮窗是独立引擎，必须本地更新后再重新下发给 TTS 引擎，
+    // 否则主 App 里换了男女声，桌面上说话的还是旧声音（这就是「切了没反应」的根因之一）。
+    if (ttsEnabled != null) SpiritConfig.ttsEnabled = ttsEnabled;
+    if (ttsVoice != null &&
+        (ttsVoice == 'female' ||
+            ttsVoice == 'male' ||
+            ttsVoice == 'default')) {
+      SpiritConfig.ttsVoice = ttsVoice;
+    }
+    if (ttsRate != null) {
+      SpiritConfig.ttsRate = ttsRate.clamp(0.3, 1.0).toDouble();
+    }
+    if (ttsEnabled != null || ttsVoice != null || ttsRate != null) {
+      SpiritTts.refresh();
+      final now = DateTime.now();
+      if (SpiritConfig.ttsEnabled &&
+          (_lastTtsEcho == null ||
+              now.difference(_lastTtsEcho!).inSeconds >= 6)) {
+        _lastTtsEcho = now;
+        Future<void>.delayed(const Duration(milliseconds: 400), () {
+          if (mounted) SpiritTts.speak('主人，我换好声音啦');
+        });
+      }
+    }
     if (petTouch) {
       _wake();
       _resetAutoHide();
@@ -352,13 +409,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
       _edge = -1;
     }
     if (mounted) setState(() => _bubble = null);
-    await FlutterOverlayWindow.resizeOverlay(
-      _miniW.toInt(),
-      _miniH.toInt(),
-      true,
-    );
-    _winW = _miniW;
-    _winH = _miniH;
+    await _applyWindowSize(_miniW, _miniH);
     if (_screenW > 0) {
       final left = _edge < 0 ? 0.0 : _screenW - _miniW;
       _roamX = left;
@@ -374,13 +425,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _bubble = null;
     _edge = 0;
     if (mounted) setState(() {});
-    await FlutterOverlayWindow.resizeOverlay(
-      _bigW.toInt(),
-      _bigH.toInt(),
-      true,
-    );
-    _winW = _bigW;
-    _winH = _bigH;
+    await _applyWindowSize(_bigW, _bigH);
     if (_screenW > 0) {
       final left =
           (_screenW / 2 - _bigW / 2)
@@ -413,6 +458,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
       _bubble = null;
       _expr = expressionById('sleep');
     });
+    SpiritSfx.play('sleep');
     SpiritTts.speak('好困，我先睡一会啦');
   }
 
@@ -437,6 +483,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     if (!mounted) return;
     if (!_sleeping && _phase == SpiritPhase.spirit && SpiritState.satiety < 30) {
       _playAction('hungry', 1600);
+      SpiritSfx.play('hungry');
       _showBubble('🍽️ 我饿啦！快喂我~', const Duration(seconds: 4));
     }
     setState(() {});
@@ -494,7 +541,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     SpiritState.mood = math.min(100, SpiritState.mood + 10);
     SpiritState.bump(2);
     await SpiritState.save();
-    SpiritSfx.play('click');
+    SpiritSfx.play('pet');
     _playAction('happy', 1400);
     _showBubble('💗 摸摸头~ 心情+10 亲密度+2', const Duration(seconds: 3));
     SpiritTts.speak('好舒服呀，再摸摸');
@@ -595,8 +642,24 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     required String emoji,
     required double s,
     String? label,
+    String? iconPath,
     bool danger = false,
   }) {
+    // 按钮图标优先用打包好的道具贴片（assets/items），无贴片时退回 emoji。
+    // 这些贴片以前只声明不引用，等于白占包体；现在喂食/摸摸按钮实际用上。
+    Widget icon(double size) {
+      if (iconPath == null) return Text(emoji, style: TextStyle(fontSize: size));
+      return Image.asset(
+        iconPath,
+        width: size * 1.15,
+        height: size * 1.15,
+        fit: BoxFit.contain,
+        gaplessPlayback: true,
+        errorBuilder: (_, __, ___) =>
+            Text(emoji, style: TextStyle(fontSize: size)),
+      );
+    }
+
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -610,13 +673,13 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
           borderRadius: label == null ? null : BorderRadius.circular(10),
           border: Border.all(color: danger ? Colors.redAccent : Colors.black12),
         ),
-        // emoji 在部分系统字体缺失时渲染空白，补文字标签兜底
+        // emoji 在部分系统字体缺失时渲染空白，补贴片或文字标签兜底
         child: label == null
-            ? Text(emoji, style: TextStyle(fontSize: s * 0.62))
+            ? icon(s * 0.62)
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(emoji, style: TextStyle(fontSize: s * 0.5)),
+                  icon(s * 0.5),
                   const SizedBox(height: 1),
                   Text(label,
                       style: const TextStyle(fontSize: 9, color: Colors.black87)),
@@ -759,10 +822,28 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
           final w = constraints.maxWidth;
           final h = constraints.maxHeight;
           final center = Offset(w / 2, h / 2);
-          final size = math.min(w * 0.62, h * 0.44);
+
+          // 顶部留给气泡、底部留给细条与喂食面板，形象整盒（size × size*1.15）
+          // 只在中段排布。旧版把形象上缘硬编码成 max(46dp, ...)，窗口一旦被系统
+          // 压小就会把蛋挤到窗口底边、细条横切蛋身，看起来就是「蛋不圆」。
+          const double reserveTop = 34;
+          const double reserveBottom = 52;
+          final availH = math.max(44.0, h - reserveTop - reserveBottom);
+          final availW = math.max(44.0, w - 8);
+          final size = math.min(
+            math.min(availW * 0.86, availH / 1.15),
+            w * 0.62,
+          );
           const btnSize = 26.0;
-          final avatarTop = math.max(46.0, center.dy - size * 0.78);
-          final foodTop = center.dy + size * 0.60;
+          final boxH = size * 1.15;
+          final avatarTop = reserveTop + math.max(0.0, (availH - boxH) / 2);
+          final avatarBottom = avatarTop + boxH;
+          final barsW = math.min(124.0, math.max(64.0, w - 16));
+          final barsTop =
+              math.min(avatarBottom + 2, math.max(4.0, h - reserveBottom));
+          final panelTop =
+              math.min(barsTop + 14, math.max(4.0, h - btnSize - 18));
+          final bubbleMax = math.max(80.0, w - 16);
 
           return Opacity(
             opacity: SpiritConfig.opacity,
@@ -798,14 +879,14 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
                   left: 4,
                   right: 4,
                   top: 4,
-                  child: _bubbleWidget(),
+                  child: _bubbleWidget(maxWidth: bubbleMax),
                 ),
                 // 饱腹度/心情细条
                 Positioned(
-                  left: center.dx - 62,
-                  top: foodTop - 14,
+                  left: center.dx - barsW / 2,
+                  top: barsTop,
                   child: SizedBox(
-                    width: 124,
+                    width: barsW,
                     child: Row(
                       children: [
                         _statBar('🍽️', SpiritState.satiety, const Color(0xFFFF9800)),
@@ -816,41 +897,49 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
                   ),
                 ),
                 // 操作面板（长按呼出）
+                // 面板比窗口宽时整体缩放，窗口被压小也不会把按钮切掉
                 if (_panelOpen)
                   Positioned(
-                    left: center.dx - 76,
-                    top: foodTop + 2,
-                    child: Row(
-                      children: [
-                        for (final f in kFoods)
+                    left: 2,
+                    right: 2,
+                    top: panelTop,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Row(
+                        children: [
+                          for (final f in kFoods)
+                            _roundBtn(
+                              onTap: () => _feed(f),
+                              emoji: f.emoji,
+                              iconPath: f.icon,
+                              label: f.name,
+                              s: btnSize,
+                            ),
                           _roundBtn(
-                            onTap: () => _feed(f),
-                            emoji: f.emoji,
-                            label: f.name,
+                            onTap: _pet,
+                            emoji: '💗',
+                            iconPath: kPetIconAsset,
+                            label: '摸摸',
                             s: btnSize,
                           ),
-                        _roundBtn(
-                          onTap: _pet,
-                          emoji: '💗',
-                          label: '摸摸',
-                          s: btnSize,
-                        ),
-                        _roundBtn(
-                          onTap: _goMini,
-                          emoji: '🫥',
-                          label: '扒边',
-                          s: btnSize,
-                          danger: true,
-                        ),
-                      ],
+                          _roundBtn(
+                            onTap: _goMini,
+                            emoji: '🫥',
+                            label: '扒边',
+                            s: btnSize,
+                            danger: true,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                // 时钟/日期徽章（点一下给一句关心话）
-                if (SpiritConfig.showClock)
+                // 时钟/日期徽章（点一下给一句关心话）；面板展开时让位，避免叠字
+                if (SpiritConfig.showClock && !_panelOpen)
                   Positioned(
-                    left: center.dx - 60,
-                    bottom: 6,
-                    child: _clockBadge(),
+                    left: 0,
+                    right: 0,
+                    bottom: 4,
+                    child: Center(child: _clockBadge()),
                   ),
               ],
             ),

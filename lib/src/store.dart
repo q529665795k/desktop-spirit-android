@@ -57,6 +57,7 @@ class SpiritState {
   static const String kEvo = 'evo';
   static const String kLastInteract = 'last_interact';
   static const String kAffinity = 'affinity';
+  static const String kInteractCount = 'interact_count';
   static const String kLastDecayAt = 'last_decay_at';
 
   static int satiety = 80;
@@ -64,6 +65,9 @@ class SpiritState {
   static int feedCount = 0;
   static bool evo = false;
   static int affinity = 0;
+
+  /// 真实互动次数（摸头 / 喂食），持久化后在主页计数器里显示
+  static int interactCount = 0;
   static DateTime lastInteract = DateTime.now();
 
   /// 成长阶段：1 幼年 / 2 少年 / 3 完全体
@@ -91,6 +95,7 @@ class SpiritState {
     feedCount = p.getInt(kFeedCount) ?? 0;
     evo = p.getBool(kEvo) ?? false;
     affinity = p.getInt(kAffinity) ?? 0;
+    interactCount = p.getInt(kInteractCount) ?? 0;
     final ti = p.getInt(kLastInteract);
     lastInteract =
         ti != null ? DateTime.fromMillisecondsSinceEpoch(ti) : DateTime.now();
@@ -112,15 +117,17 @@ class SpiritState {
     await p.setInt(kFeedCount, feedCount);
     await p.setBool(kEvo, evo);
     await p.setInt(kAffinity, affinity);
+    await p.setInt(kInteractCount, interactCount);
     await p.setInt(kLastInteract, lastInteract.millisecondsSinceEpoch);
     await p.setInt(kLastDecayAt, DateTime.now().millisecondsSinceEpoch);
   }
 
   static void touch() => lastInteract = DateTime.now();
 
-  /// 真实互动（摸头 / 喂食）才加亲密度
+  /// 真实互动（摸头 / 喂食）才加亲密度，并累计互动次数
   static void bump(int amount) {
     affinity = math.min(999, affinity + amount);
+    interactCount++;
     touch();
   }
 
@@ -138,6 +145,7 @@ class SpiritState {
     feedCount = 0;
     evo = false;
     affinity = 0;
+    interactCount = 0;
     lastInteract = DateTime.now();
   }
 }
@@ -149,6 +157,7 @@ class SpiritConfig {
   static const String kAutoHideDelay = 'auto_hide_delay';
   static const String kTtsRate = 'tts_rate';
   static const String kTtsVoice = 'tts_voice';
+  static const String kTtsEnabled = 'tts_enabled';
   static const String kRoamEnabled = 'roam_enabled';
   static const String kCustomAvatar = 'custom_avatar_path';
   static const String kSkin = 'skin_id';
@@ -169,6 +178,9 @@ class SpiritConfig {
 
   /// 音色 female / male / default
   static String ttsVoice = 'female';
+
+  /// 语音播报开关（关掉后只出气泡不出声）
+  static bool ttsEnabled = true;
 
   /// 满屏自由漫游
   static bool roamEnabled = true;
@@ -193,6 +205,7 @@ class SpiritConfig {
     ttsRate = (p.getDouble(kTtsRate) ?? 0.5).clamp(0.3, 1.0);
     final v = p.getString(kTtsVoice) ?? 'female';
     ttsVoice = (v == 'female' || v == 'male' || v == 'default') ? v : 'female';
+    ttsEnabled = p.getBool(kTtsEnabled) ?? true;
     roamEnabled = p.getBool(kRoamEnabled) ?? true;
     customAvatarPath = p.getString(kCustomAvatar) ?? '';
     skinId = p.getString(kSkin) ?? 'origin';
@@ -207,6 +220,7 @@ class SpiritConfig {
     await p.setInt(kAutoHideDelay, autoHideDelay);
     await p.setDouble(kTtsRate, ttsRate);
     await p.setString(kTtsVoice, ttsVoice);
+    await p.setBool(kTtsEnabled, ttsEnabled);
     await p.setBool(kRoamEnabled, roamEnabled);
     await p.setString(kCustomAvatar, customAvatarPath);
     await p.setString(kSkin, skinId);

@@ -40,6 +40,37 @@ class SpriteAnim extends StatefulWidget {
     'final': 5,
   };
 
+  /// 默认播放帧率（每秒几帧）。talk / angry 用 5，其余用 6。
+  static const double kDefaultFps = 6;
+
+  /// 某动作的播放帧率：说话与生气放慢一档，读台词/皱眉更自然。
+  static double fpsFor(String dir) => (dir == 'talk' || dir == 'angry') ? 5 : 6;
+
+  /// 每帧停留时长（毫秒）= `1000 / fps` 取整。
+  ///
+  /// 取整后「每帧时长 × 帧数」恰好等于整轮时长，除不尽也不会让某帧多停一下，
+  /// 这样帧数与播放间隔永远自洽（旧版「轮播取帧乱序 / 卡帧」就是除不尽又没取模）。
+  static int frameMillis(double fps) {
+    final f = fps <= 0 ? kDefaultFps : fps;
+    return (1000 / f).round();
+  }
+
+  /// 某动作整轮循环时长 = 帧数 × 每帧时长，收敛到 [200, 8000] ms。
+  static Duration cycleFor(String dir, double fps) {
+    final frames = kFrameCounts[dir] ?? 1;
+    return Duration(milliseconds: (frameMillis(fps) * frames).clamp(200, 8000));
+  }
+
+  /// 动画进度（0.0~1.0）→ 当前帧下标（0-based）。
+  ///
+  /// 一轮内每一帧恰好出现一次：progress = 1.0 取模归到下一轮的第 0 帧，
+  /// 既不越界也不跳过首/末帧。抽成纯函数，便于单测断言「N 帧只跑 N 次、不跳帧」。
+  static int frameIndexAt(double progress, int frames) {
+    if (frames <= 1) return 0;
+    final v = progress.clamp(0.0, 1.0);
+    return (v * frames).floor() % frames;
+  }
+
   @override
   State<SpriteAnim> createState() => _SpriteAnimState();
 }
@@ -54,18 +85,15 @@ class _SpriteAnimState extends State<SpriteAnim>
   void initState() {
     super.initState();
     _frames = SpriteAnim.kFrameCounts[widget.dir] ?? 1;
-    _c = AnimationController(vsync: this, duration: _durationFor());
+    _c = AnimationController(
+      vsync: this,
+      duration: SpriteAnim.cycleFor(widget.dir, widget.fps),
+    );
     _c.addListener(() {
-      final idx = (_c.value * _frames).floor() % _frames;
+      final idx = SpriteAnim.frameIndexAt(_c.value, _frames);
       if (idx != _idx) setState(() => _idx = idx);
     });
     _c.repeat();
-  }
-
-  /// 整轮时长 = 帧数 × 每帧间隔，避免 N 帧在 1000/fps 内跑完导致疯狂闪烁
-  Duration _durationFor() {
-    final perFrame = (1000 / widget.fps).round();
-    return Duration(milliseconds: (perFrame * _frames).clamp(200, 8000));
   }
 
   @override
@@ -73,7 +101,7 @@ class _SpriteAnimState extends State<SpriteAnim>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.dir != widget.dir || oldWidget.fps != widget.fps) {
       _frames = SpriteAnim.kFrameCounts[widget.dir] ?? 1;
-      _c.duration = _durationFor();
+      _c.duration = SpriteAnim.cycleFor(widget.dir, widget.fps);
       _c.value = 0;
       setState(() => _idx = 0);
       _c.repeat();
@@ -227,9 +255,11 @@ class _SpiritAvatarState extends State<SpiritAvatar>
     );
   }
 
+  /// 情绪徽标：优先用打包好的表情贴片（assets/items），没有贴片时退回 emoji。
   Widget _badge(Expression expr, double s, {String? override}) {
     final emoji = override ?? expr.badge;
-    if (emoji.isEmpty) return const SizedBox.shrink();
+    final asset = override == null ? expr.badgeAsset : null;
+    if (asset == null && emoji.isEmpty) return const SizedBox.shrink();
     final d = s * 0.24;
     return Container(
       width: d,
@@ -241,11 +271,25 @@ class _SpiritAvatarState extends State<SpiritAvatar>
         border: Border.all(color: Colors.black12),
         boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
       ),
-      child: Text(
-        emoji,
-        style: TextStyle(fontSize: d * 0.58),
-        textAlign: TextAlign.center,
-      ),
+      child: asset != null
+          ? Padding(
+              padding: EdgeInsets.all(d * 0.16),
+              child: Image.asset(
+                asset,
+                fit: BoxFit.contain,
+                gaplessPlayback: true,
+                errorBuilder: (_, __, ___) => Text(
+                  emoji,
+                  style: TextStyle(fontSize: d * 0.58),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            )
+          : Text(
+              emoji,
+              style: TextStyle(fontSize: d * 0.58),
+              textAlign: TextAlign.center,
+            ),
     );
   }
 
@@ -288,8 +332,10 @@ class _SpiritAvatarState extends State<SpiritAvatar>
           ],
         );
       } else {
-        final dir = action ?? (widget.evo ? 'final' : 'idle');
-        final fps = (dir == 'talk' || dir == 'angry') ? 5.0 : 6.0;
+        // 表情复用不同动作帧：发呆=idle、撒娇=talk、兴奋=dance……
+        // 旧版这里写死 'idle'，导致「闲置轮播换表情」时只有徽标在变、帧没变。
+        final dir = action ?? (widget.evo ? 'final' : expr.dir);
+        final fps = SpriteAnim.fpsFor(dir);
         body = AnimatedBuilder(
           animation: _idle,
           builder: (context, child) {
@@ -318,6 +364,18 @@ class _SpiritAvatarState extends State<SpiritAvatar>
         SizedBox(width: s, height: s * 1.15, child: body),
         skin,
       );
+      // 派生表情（好奇/撒娇/兴奋）与基础表情共用同一组帧，靠色偏区分。
+      // tint 此前是「声明了却没生效」的死字段，这里补上（自定义形象不叠加，避免糊图）。
+      final tint = expr.tint;
+      if (tint != null && !custom) {
+        content = ColorFiltered(
+          colorFilter: ColorFilter.mode(
+            tint.withOpacity(0.25),
+            BlendMode.srcATop,
+          ),
+          child: content,
+        );
+      }
 
       if (widget.showStats) {
         content = Stack(
@@ -344,7 +402,11 @@ class _SpiritAvatarState extends State<SpiritAvatar>
             Positioned(
               right: -s * 0.03,
               top: -s * 0.06,
-              child: _badge(expr, s, override: isSleeping ? '💤' : null),
+              child: _badge(
+                expr,
+                s,
+                override: isSleeping && expr.badgeAsset == null ? '💤' : null,
+              ),
             ),
         ],
       );
