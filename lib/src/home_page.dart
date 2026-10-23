@@ -487,16 +487,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  /// 大小缩放：拖动时只更新本地（预览立刻跟着变），松手才下发给悬浮窗，
-  /// 避免拖一次滑杆触发几十次原生 resize（原生 resize 是通道调用，拖拽中会卡）。
-  Future<void> _updatePetScale(double v) async {
-    SpiritConfig.petScale = v.clamp(0.6, 1.4).toDouble();
-    await SpiritConfig.save();
+  /// 大小缩放：拖动中只改内存值（预览立刻跟着变），不每帧写一次磁盘，
+  /// 松手（onChangeEnd）才落盘并下发给悬浮窗 —— 原生 resize 是通道调用，
+  /// 拖一次滑杆会触发多次，拖拽中下发会卡顿。
+  void _updatePetScale(double v) {
+    final next = v.clamp(0.6, 1.4).toDouble();
+    SpiritConfig.petScale = next;
     if (!mounted) return;
-    setState(() => _petScale = SpiritConfig.petScale);
+    setState(() => _petScale = next);
   }
 
+  /// 松手：先落盘（悬浮窗引擎启动时会自己读这个值），再通知正在跑的悬浮窗实时改尺寸。
   Future<void> _pushPetScale() async {
+    SpiritConfig.petScale = _petScale.clamp(0.6, 1.4).toDouble();
+    await SpiritConfig.save();
     try {
       await FlutterOverlayWindow.shareData(
           jsonEncode({'petScale': SpiritConfig.petScale}));

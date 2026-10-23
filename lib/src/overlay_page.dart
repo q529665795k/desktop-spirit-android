@@ -918,8 +918,12 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
           // 顶部留给气泡、底部留给细条与喂食面板，形象整盒（size × size*1.15）
           // 只在中段排布。旧版把形象上缘硬编码成 max(46dp, ...)，窗口一旦被系统
           // 压小就会把蛋挤到窗口底边、细条横切蛋身，看起来就是「蛋不圆」。
-          const double reserveTop = 34;
-          const double reserveBottom = 52;
+          //
+          // 这两个留白也跟着 [_scale] 一起缩：它们是固定 dp 时，窗口越小占的比例越大，
+          // 蛋会被压得比滑杆上的百分比还小（0.6 时实测只剩约 41%）——
+          // 用户拖到「60%」却看不到 60% 的大小。乘上缩放后，形象尺寸与百分比严格成正比。
+          final reserveTop = 34.0 * _scale;
+          final reserveBottom = 52.0 * _scale;
           final availH = math.max(44.0, h - reserveTop - reserveBottom);
           final availW = math.max(44.0, w - 8);
           final size = math.min(
