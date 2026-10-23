@@ -148,19 +148,23 @@ jobs:
           fi
 
           # 5) 完全离线 + 无无障碍：权限与 dex 里都不该出现 INTERNET / AccessibilityService
+          #    注意：APK 里的 AndroidManifest.xml 是 aapt2 编译的二进制 AXML，字符串池不是
+          #    连续 ASCII（实测 `strings` 命中数为 0），用 strings 断言会静默失效。改用
+          #    ci/axml_strings.py 真正解析字符串池。
           unzip -p "$APK" AndroidManifest.xml > /tmp/am.bin
-          if strings /tmp/am.bin | grep -q "android.intent.action.TTS_SERVICE"; then
+          python3 ci/axml_strings.py /tmp/am.bin > /tmp/am_strings.txt
+          if grep -q "android.intent.action.TTS_SERVICE" /tmp/am_strings.txt; then
             echo "OK APK 清单含 TTS 引擎可见性声明"
           else
             echo "::error::APK 清单缺少 TTS_SERVICE query，装到 Android 11+ 会没有声音"
             exit 1
           fi
-          if strings /tmp/am.bin | grep -q "android.permission.INTERNET"; then
+          if grep -q "android.permission.INTERNET" /tmp/am_strings.txt; then
             echo "::error::APK 声明了 INTERNET 权限，与「完全离线」不符"
             exit 1
           fi
           echo "OK 无 INTERNET 权限（完全离线）"
-          if strings /tmp/am.bin | grep -qE "AccessibilityService|BIND_ACCESSIBILITY"; then
+          if grep -qE "AccessibilityService|BIND_ACCESSIBILITY" /tmp/am_strings.txt; then
             echo "::error::APK 里仍有无障碍服务痕迹（吃图标功能应已剔除）"
             exit 1
           fi
