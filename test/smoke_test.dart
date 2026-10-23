@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:desktop_spirit/src/audio.dart';
 import 'package:desktop_spirit/src/avatar.dart';
 import 'package:desktop_spirit/src/brand.dart';
+import 'package:desktop_spirit/src/chatter.dart';
 import 'package:desktop_spirit/src/models.dart';
 import 'package:desktop_spirit/src/store.dart';
 
@@ -116,6 +118,81 @@ void main() {
     SpiritState.feedCount = 10;
     expect(SpiritState.growthStage, 3);
     SpiritState.reset();
+  });
+
+  // ===== 孵化期台词：不再无限重复 =====
+  // 用户报的「破壳后还在重复读破壳前的语音」，第一根因就是
+  // 倒计时归零后 tick 每次无条件返回同一句，而调用方每 10 秒 tick 一次。
+
+  test('破壳就绪台词只在间隔到期时出现，不会每 10 秒重读一遍', () {
+    HatchChatter.reset();
+    expect(HatchChatter.tick(0), HatchChatter.readyLine);
+    expect(HatchChatter.tick(0), '',
+        reason: '刚提醒过就不该再喊，否则蛋没被点破时会永远每 10 秒重复同一句');
+    expect(HatchChatter.tick(0), '');
+    expect(HatchChatter.readyRepeatSeconds, greaterThanOrEqualTo(60),
+        reason: '重复间隔太短体感仍然是重复朗读');
+  });
+
+  test('里程碑台词每个只报一次，随后转回静默/撒娇节奏', () {
+    HatchChatter.reset();
+    expect(HatchChatter.tick(180), contains('3分钟'));
+    expect(HatchChatter.tick(180), '');
+    expect(HatchChatter.tick(120), contains('2分钟'));
+    expect(HatchChatter.tick(60), contains('1分钟'));
+    expect(HatchChatter.tick(30), contains('30秒'));
+    expect(HatchChatter.tick(10), contains('10秒'));
+    // 里程碑都说完后，回到「约每 30 秒一句撒娇/喊饿」的节奏（10 秒一 tick → 每 3 次一跳）。
+    // 连续三次 tick 里恰好只有一次出声，且那一句来自撒娇/喊饿池；
+    // 不写死「第几次出声」——计数器从上一段带过来的偏移不该成为断言的一部分。
+    final tail = [
+      HatchChatter.tick(180),
+      HatchChatter.tick(180),
+      HatchChatter.tick(180),
+    ];
+    expect(tail.where((s) => s.isNotEmpty).length, 1,
+        reason: '三次 tick 只应出现一句撒娇台词，其余静默');
+    expect(HatchChatter.idleLines, contains(tail.firstWhere((s) => s.isNotEmpty)));
+  });
+
+  test('跨引擎状态：loadFresh 读平台相位，悬浮窗心跳可标记存活/关窗', () async {
+    // Dart 侧缓存是按引擎独立的：不 reload 读不到另一个引擎写的相位。
+    SharedPreferences.setMockInitialValues({'spirit_phase': 'spirit'});
+    expect(await SpiritStore.loadFresh(), SpiritPhase.spirit);
+
+    await SpiritStore.markOverlayAlive();
+    expect(await SpiritStore.refreshOverlayAlive(), isTrue,
+        reason: '悬浮窗活着时主界面必须知道，否则会跟着一起读台词');
+    await SpiritStore.markOverlayDead();
+    expect(await SpiritStore.refreshOverlayAlive(), isFalse,
+        reason: '关窗后要立刻恢复「台词由主界面来说」');
+    expect(SpiritStore.overlayAliveWindowSeconds, inInclusiveRange(30, 300),
+        reason: '心跳窗口太大 → 悬浮窗关掉后主界面长时间不敢说话');
+  });
+
+  // ===== 两路语音：同一句台词不许两个引擎各念一遍 =====
+  // 主界面与悬浮窗跑同一套孵化脚本（开场白 + 里程碑倒计时），文案一字不差。
+
+  test('同一句台词跨引擎只念一次，不同台词互不影响', () async {
+    SharedPreferences.setMockInitialValues({});
+    const intro = '主人，我在蛋里啦，记得喂我呀';
+    expect(await SpiritStore.claimLine(intro), isTrue);
+    expect(await SpiritStore.claimLine(intro), isFalse,
+        reason: '另一个引擎刚念过同一句就该让位，否则用户听到同一句被读两遍');
+    expect(await SpiritStore.claimLine('主人，我还有1分钟就要破壳啦~'), isTrue,
+        reason: '不同台词不受去重影响');
+    expect(SpiritStore.lineDedupeWindowSeconds, inInclusiveRange(5, 120),
+        reason: '窗口过小挡不住「先开 App 再点悬浮窗」的两个引擎；'
+            '过大又会把用户主动触发的正常台词吞掉');
+    expect(await SpiritStore.claimLine(intro, windowSeconds: 0), isTrue,
+        reason: '窗口为 0 表示不去重，用来确认这个窗口确实在起作用');
+  });
+
+  test('灵宠大小缩放：默认值在合法区间内，上下限就是滑杆的 60%~140%', () {
+    expect(SpiritConfig.petScale, inInclusiveRange(0.6, 1.4));
+    expect(0.6.clamp(0.6, 1.4), 0.6);
+    expect(1.4.clamp(0.6, 1.4), 1.4);
+    expect(2.0.clamp(0.6, 1.4), 1.4);
   });
 
   // ===== 语音（TTS）=====

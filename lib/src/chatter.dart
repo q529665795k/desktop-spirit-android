@@ -26,8 +26,21 @@ class OverlayActionChannel {
 /// 静态状态不共享，互不影响）。
 class HatchChatter {
   static const List<int> milestones = [180, 120, 60, 30, 10];
+
+  /// 破壳就绪后再次提醒的最小间隔（秒）。
+  ///
+  /// 旧版对 `remainSeconds <= 0` 无条件返回同一句「主人，我要破壳啦，快点点我！」，
+  /// 而调用方每 10 秒 tick 一次、闸门又只是「相位是否还是蛋」——
+  /// 蛋没被点破时这句就每 10 秒重复一次、永不停止，这是「破壳前的话被反复朗读」
+  /// 的第一个根因。现在改成：就绪时最多每 3 分钟提醒一次，其余 tick 静默。
+  static const int readyRepeatSeconds = 180;
+
+  /// 破壳就绪台词（启动时就绪的场景也复用它，保证口径一致）
+  static const String readyLine = '主人，我要破壳啦，快点点我！';
+
   static final Set<int> _said = <int>{};
   static int _idleTicks = 0;
+  static DateTime? _lastReadySay;
 
   static const List<String> idleLines = [
     '主人，我饿啦，蛋壳里好无聊~',
@@ -43,7 +56,13 @@ class HatchChatter {
   /// 每 10 秒调一次；返回本次应播报的台词，空串表示本次静默。
   static String tick(int remainSeconds) {
     if (remainSeconds <= 0) {
-      return '主人，我要破壳啦，快点点我！';
+      final now = DateTime.now();
+      if (_lastReadySay == null ||
+          now.difference(_lastReadySay!).inSeconds >= readyRepeatSeconds) {
+        _lastReadySay = now;
+        return readyLine;
+      }
+      return '';
     }
     for (final m in milestones) {
       if (remainSeconds <= m && !_said.contains(m)) {
@@ -60,6 +79,10 @@ class HatchChatter {
     return '';
   }
 
+  /// 重新开始一轮孵化播报（里程碑台词可以再次触发）。
+  ///
+  /// 注意：**不**重置 [_lastReadySay] —— 破壳就绪的提醒间隔跨轮次继续生效，
+  /// 否则「切到后台再回前台」会立刻又喊一次，体感上仍然是重复朗读。
   static void reset() {
     _said.clear();
     _idleTicks = 0;

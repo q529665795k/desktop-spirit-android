@@ -38,6 +38,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
   Timer? _clockTimer;
   StreamSubscription<dynamic>? _overlaySub;
 
+  /// 相位兜底轮询：只在蛋形态期间运行，对齐另一个引擎的破壳结果
+  Timer? _phaseWatch;
+
   SpiritPhase _phase = SpiritPhase.egg;
   bool _loaded = false;
   bool _evolving = false;
@@ -64,6 +67,10 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
 
   /// 连续闲置这么久（秒）自动入睡
   static const int _sleepIdleSeconds = 300;
+
+  /// 用户设置的灵宠大小（0.6 ~ 1.4）。窗口尺寸与形象绘制尺寸都乘它，
+  /// 所以「蛋太大」可以直接把窗口一起缩小，而不是把形象硬塞进大窗口。
+  double get _scale => SpiritConfig.petScale.clamp(0.6, 1.4).toDouble();
 
   // ===== 漫游与坐标 =====
   double _winW = _bigW;
@@ -111,21 +118,28 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
       _clock = TimeAware.clockText();
       _date = TimeAware.dateText();
     });
-    _winW = _bigW;
-    _winH = _bigH;
+    _winW = _bigW * _scale;
+    _winH = _bigH * _scale;
     await _syncScreenSize();
     // 原生首次建窗时把 Dart 传来的 200/240 直接当物理像素用（插件历史行为），
     // 在 2.75 倍屏上逻辑尺寸只剩约 73×87dp：形象被压到底边、气泡没有排布空间。
     // 引擎就绪后主动 resizeOverlay 一次校正到 dp 规格（原生 resize 通道会做 dp→px）。
-    await _applyWindowSize(_bigW, _bigH);
+    await _applyWindowSize(_bigW * _scale, _bigH * _scale);
     _startSleepWatch();
-    _decayTimer = Timer.periodic(const Duration(seconds: 30), (_) => _onDecay());
+    // 心跳：主界面靠它判断「桌面上的灵宠还在不在」，从而决定台词由谁来说，
+    // 避免两个引擎同时读同一句（用户听到的「两个语音读文」）。
+    SpiritStore.markOverlayAlive();
+    _decayTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      SpiritStore.markOverlayAlive();
+      _onDecay();
+    });
     _boredTimer = Timer.periodic(const Duration(seconds: 60), (_) => _onBored());
     _roamTimer =
         Timer.periodic(const Duration(milliseconds: 1200), (_) => _onRoamTick());
     _moodTimer = Timer.periodic(const Duration(seconds: 15), (_) => _onMoodTick());
     _clockTimer = Timer.periodic(const Duration(seconds: 30), (_) => _onClockTick());
     _startHatchChatter();
+    _startPhaseWatch();
     _resetAutoHide();
     // 开窗先亮一句：悬浮态下文字必须能看见（蛋形态由 HatchChatter 的开场台词负责）
     if (_phase == SpiritPhase.spirit) {
@@ -174,24 +188,85 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _hatchTimer?.cancel();
     HatchChatter.reset();
     if (_phase != SpiritPhase.egg) return;
-    Timer(const Duration(seconds: 3), () {
-      if (mounted && _phase == SpiritPhase.egg) {
-        _showBubble('主人，我在蛋里啦，5 分钟后破壳，记得喂我呀~',
-            const Duration(seconds: 4));
-        SpiritTts.speak('主人，我在蛋里啦，记得喂我呀');
+    Timer(const Duration(seconds: 3), () async {
+      if (!mounted || _phase != SpiritPhase.egg) return;
+      // 主界面刚开过 App、用户紧接着点开悬浮窗时，这句开场白两个引擎都会念；
+      // 谁先念谁占位，另一个 90 秒内不重复（否则用户听到同一句被读两遍）。
+      if (!await SpiritStore.claimLine('主人，我在蛋里啦，记得喂我呀',
+          windowSeconds: 90)) {
+        return;
       }
+      if (!mounted || _phase != SpiritPhase.egg) return;
+      _showBubble('主人，我在蛋里啦，5 分钟后破壳，记得喂我呀~',
+          const Duration(seconds: 4));
+      SpiritTts.speak('主人，我在蛋里啦，记得喂我呀');
     });
-    _hatchTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _hatchTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
       if (!mounted || _phase != SpiritPhase.egg) {
         _hatchTimer?.cancel();
         return;
       }
       final line = HatchChatter.tick(SpiritStore.remainingSeconds());
-      if (line.isNotEmpty) {
-        _showBubble(line, const Duration(seconds: 4));
-        SpiritTts.speak(line);
-      }
+      if (line.isEmpty) return;
+      // 里程碑文案两边一字不差，另一个引擎刚念过就静默，避免两路语音
+      if (!await SpiritStore.claimLine(line)) return;
+      if (!mounted) return;
+      _showBubble(line, const Duration(seconds: 4));
+      SpiritTts.speak(line);
     });
+  }
+
+  /// 另一个引擎（主界面）已经破壳：把相位对齐过来，并且**不出声**。
+  /// 问候语由亲手破壳的那一侧播过一次了，这里再读一遍就是「两个语音读文」。
+  ///
+  /// 通道消息之外的兜底轮询：个别 ROM 上跨引擎消息会丢，丢了的后果就是
+  /// 悬浮窗一直停在蛋、继续读孵化期台词。
+  void _startPhaseWatch() {
+    _phaseWatch?.cancel();
+    if (_phase != SpiritPhase.egg) return;
+    _phaseWatch = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (!mounted || _phase != SpiritPhase.egg) {
+        _phaseWatch?.cancel();
+        return;
+      }
+      final ph = await SpiritStore.loadFresh();
+      if (!mounted || ph != SpiritPhase.spirit) return;
+      _phaseWatch?.cancel();
+      _hatchTimer?.cancel();
+      setState(() {
+        _phase = SpiritPhase.spirit;
+        _expr = expressionById('idle');
+      });
+      _showBubble('破壳啦，我从蛋壳里出来咯~', const Duration(seconds: 3));
+    });
+  }
+
+  /// 按当前 [_scale] 重设窗口尺寸与落点（主界面拖动「大小」后下发）。
+  Future<void> _applyPetScale() async {
+    if (_screenW <= 0) await _syncScreenSize();
+    if (_mini) {
+      final w = _miniW * _scale;
+      await _applyWindowSize(w, _miniH * _scale);
+      if (_screenW > 0) {
+        final left = _edge < 0 ? 0.0 : math.max(0.0, _screenW - w);
+        _roamX = left;
+        await _moveTo(left, math.max(40.0, _roamY));
+      }
+    } else {
+      final w = _bigW * _scale;
+      await _applyWindowSize(w, _bigH * _scale);
+      if (_screenW > 0) {
+        final left = (_screenW / 2 - w / 2)
+            .clamp(5.0, math.max(5.0, _screenW - w - 5))
+            .toDouble();
+        _roamX = left;
+        await _moveTo(left, math.max(40.0, _roamY));
+      }
+    }
+    if (!mounted) return;
+    setState(() {});
+    _showBubble('大小：${(_scale * 100).round()}%', const Duration(seconds: 2));
+    _resetAutoHide();
   }
 
   // ===== 气泡 =====
@@ -241,6 +316,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _moodTimer?.cancel();
     _clockTimer?.cancel();
     _overlaySub?.cancel();
+    _phaseWatch?.cancel();
+    // 关窗即清心跳：主界面立刻恢复「台词由我来说」，不用等心跳过期
+    SpiritStore.markOverlayDead();
     super.dispose();
   }
 
@@ -257,6 +335,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     bool? ttsEnabled;
     String? ttsVoice;
     double? ttsRate;
+    double? petScale;
     try {
       dynamic m = event;
       if (event is String) m = jsonDecode(event);
@@ -271,6 +350,7 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
         if (m.containsKey('ttsEnabled')) ttsEnabled = m['ttsEnabled'] == true;
         ttsVoice = m['ttsVoice'] as String?;
         ttsRate = (m['ttsRate'] as num?)?.toDouble();
+        petScale = (m['petScale'] as num?)?.toDouble();
       }
     } catch (_) {}
 
@@ -312,7 +392,15 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     }
     if (hatchComplete == true) {
       _hatchTimer?.cancel();
+      _phaseWatch?.cancel();
       _phase = SpiritPhase.spirit;
+      // 注意：这里**不播**问候语与破壳音效 —— 破壳是在主界面点的，
+      // 声音已经由主界面出过，跟着一起读就是用户听到的「两个语音读文」。
+    }
+    // 大小缩放：主界面松手后下发，这里重设窗口尺寸并回一句提示
+    if (petScale != null) {
+      SpiritConfig.petScale = petScale.clamp(0.6, 1.4).toDouble();
+      _applyPetScale();
     }
     if (mounted) setState(() {});
   }
@@ -409,9 +497,11 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
       _edge = -1;
     }
     if (mounted) setState(() => _bubble = null);
-    await _applyWindowSize(_miniW, _miniH);
+    final mw = _miniW * _scale;
+    final mh = _miniH * _scale;
+    await _applyWindowSize(mw, mh);
     if (_screenW > 0) {
-      final left = _edge < 0 ? 0.0 : _screenW - _miniW;
+      final left = _edge < 0 ? 0.0 : _screenW - mw;
       _roamX = left;
       await _moveTo(left, math.max(40.0, _roamY));
     }
@@ -425,12 +515,12 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
     _bubble = null;
     _edge = 0;
     if (mounted) setState(() {});
-    await _applyWindowSize(_bigW, _bigH);
+    final bw = _bigW * _scale;
+    await _applyWindowSize(bw, _bigH * _scale);
     if (_screenW > 0) {
-      final left =
-          (_screenW / 2 - _bigW / 2)
-              .clamp(5.0, math.max(5.0, _screenW - _bigW - 5))
-              .toDouble();
+      final left = (_screenW / 2 - bw / 2)
+          .clamp(5.0, math.max(5.0, _screenW - bw - 5))
+          .toDouble();
       _roamX = left;
       await _moveTo(left, math.max(40.0, _roamY));
     }
@@ -796,6 +886,8 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
         builder: (context, constraints) {
           // 缩头态：只露一个脑袋，点一下恢复 + 摸头
           if (_mini) {
+            final pw = _peekW * _scale;
+            final ph = _peekH * _scale;
             return Opacity(
               opacity: SpiritConfig.opacity,
               child: GestureDetector(
@@ -809,9 +901,9 @@ class _SpiritOverlayState extends State<SpiritOverlay> {
                     minHeight: 0,
                     maxHeight: double.infinity,
                     child: SizedBox(
-                      width: _peekW,
-                      height: _peekH,
-                      child: _avatar(size: _peekW, showBadge: false),
+                      width: pw,
+                      height: ph,
+                      child: _avatar(size: pw, showBadge: false),
                     ),
                   ),
                 ),

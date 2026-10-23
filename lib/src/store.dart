@@ -9,12 +9,95 @@ import 'models.dart';
 class SpiritStore {
   static const String _kPhase = 'spirit_phase';
   static const String _kHatchReadyAt = 'hatch_ready_at';
+  static const String _kOverlayAliveAt = 'overlay_alive_at';
+  static const String _kVoiceLastLine = 'voice_last_line';
+  static const String _kVoiceLastAt = 'voice_last_at';
+
+  /// 同一句台词在两个引擎之间的去重窗口（秒）。
+  ///
+  /// 主界面与悬浮窗跑的是**同一套**孵化脚本：开场白「主人，我在蛋里啦…」、
+  /// 以及倒计时里程碑（「我还有1分钟就要破壳啦~」）两边的文案一字不差。
+  /// 用户先开 App、随后又点开悬浮窗，就会在几秒内听到同一句被念两遍——
+  /// 也就是「两个语音读文」。谁先念谁写时间戳，窗口期内另一个引擎同一句静默。
+  static const int lineDedupeWindowSeconds = 25;
+
+  /// 悬浮窗心跳有效窗口（秒）。超过这么久没刷新，就认为悬浮窗已经关了/被杀掉。
+  static const int overlayAliveWindowSeconds = 90;
 
   static DateTime? hatchReadyAt;
+
+  /// 悬浮窗（另一个引擎）最近是否还活着。主界面用它决定「灵宠的台词由谁来说」。
+  static bool overlayAlive = false;
 
   static Future<SpiritPhase> load() async {
     final p = await SharedPreferences.getInstance();
     return p.getString(_kPhase) == 'spirit' ? SpiritPhase.spirit : SpiritPhase.egg;
+  }
+
+  /// 跨引擎读相位：`reload()` 先丢掉 Dart 侧缓存再从平台重读。
+  ///
+  /// shared_preferences 的 Dart 实例是**按引擎各自缓存**的：悬浮窗引擎破壳时写进
+  /// SharedPreferences，主界面引擎的 `_preferenceCache` 里还是「蛋」，
+  /// 直接 `load()` 读出来永远是旧值 —— 这正是「悬浮窗破壳了、主界面还在按蛋说话」
+  /// 的根因。跨引擎读取一律走这个方法。
+  static Future<SpiritPhase> loadFresh() async {
+    final p = await SharedPreferences.getInstance();
+    try {
+      await p.reload();
+    } catch (_) {}
+    return p.getString(_kPhase) == 'spirit' ? SpiritPhase.spirit : SpiritPhase.egg;
+  }
+
+  /// 悬浮窗引擎心跳（每 30 秒一次）：主界面据此判断桌面上的灵宠还在不在。
+  static Future<void> markOverlayAlive() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(_kOverlayAliveAt, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  /// 悬浮窗关窗/销毁时清掉心跳，主界面立刻恢复「由我来说话」。
+  static Future<void> markOverlayDead() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove(_kOverlayAliveAt);
+    overlayAlive = false;
+  }
+
+  /// 重新判定悬浮窗是否存活（心跳在 90 秒内算活）
+  static Future<bool> refreshOverlayAlive() async {
+    final p = await SharedPreferences.getInstance();
+    try {
+      await p.reload();
+    } catch (_) {}
+    final ts = p.getInt(_kOverlayAliveAt);
+    overlayAlive = ts != null &&
+        DateTime.now()
+                .difference(DateTime.fromMillisecondsSinceEpoch(ts))
+                .inSeconds <=
+            overlayAliveWindowSeconds;
+    return overlayAlive;
+  }
+
+  /// 申请「这句台词由我这台引擎来说」；返回 false 表示另一个引擎刚念过同一句。
+  ///
+  /// 两个引擎的 SharedPreferences 缓存各自独立，读写前一律 `reload()`，
+  /// 否则去重表读到的永远是本引擎最后一次写的值，跨引擎就失效了。
+  static Future<bool> claimLine(String line,
+      {int windowSeconds = lineDedupeWindowSeconds}) async {
+    if (line.isEmpty) return false;
+    final p = await SharedPreferences.getInstance();
+    try {
+      await p.reload();
+    } catch (_) {}
+    final last = p.getString(_kVoiceLastLine);
+    final at = p.getInt(_kVoiceLastAt);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (last == line &&
+        at != null &&
+        now - at <= windowSeconds * 1000) {
+      return false;
+    }
+    await p.setString(_kVoiceLastLine, line);
+    await p.setInt(_kVoiceLastAt, now);
+    return true;
   }
 
   static Future<void> save(SpiritPhase phase) async {
@@ -88,8 +171,17 @@ class SpiritState {
     }
   }
 
-  static Future<void> load() async {
+  /// 读取养成数值。
+  ///
+  /// [refresh] = true 时先 `reload()` 再读：主界面切回前台、或悬浮窗在桌面上喂过食
+  /// 之后，Dart 侧缓存里还是旧数值，不 reload 就会显示过期的饱腹度/心情。
+  static Future<void> load({bool refresh = false}) async {
     final p = await SharedPreferences.getInstance();
+    if (refresh) {
+      try {
+        await p.reload();
+      } catch (_) {}
+    }
     satiety = p.getInt(kSatiety) ?? 80;
     mood = p.getInt(kMood) ?? 80;
     feedCount = p.getInt(kFeedCount) ?? 0;
@@ -163,6 +255,13 @@ class SpiritConfig {
   static const String kSkin = 'skin_id';
   static const String kSfxEnabled = 'sfx_enabled';
   static const String kShowClock = 'show_clock';
+  static const String kPetScale = 'pet_scale';
+
+  /// 灵宠大小缩放 0.6 ~ 1.4（1.0 = 最初的尺寸）。
+  ///
+  /// 悬浮窗窗口高度与形象绘制尺寸一起按它缩放，蛋和精灵同步生效。
+  /// 默认 0.85：不少机型上 200×240dp 的蛋偏大，留出一点余量。
+  static double petScale = 0.85;
 
   /// 悬浮窗透明度 0.4 ~ 1.0
   static double opacity = 1.0;
@@ -211,6 +310,7 @@ class SpiritConfig {
     skinId = p.getString(kSkin) ?? 'origin';
     sfxEnabled = p.getBool(kSfxEnabled) ?? true;
     showClock = p.getBool(kShowClock) ?? true;
+    petScale = (p.getDouble(kPetScale) ?? 0.85).clamp(0.6, 1.4).toDouble();
   }
 
   static Future<void> save() async {
@@ -226,5 +326,6 @@ class SpiritConfig {
     await p.setString(kSkin, skinId);
     await p.setBool(kSfxEnabled, sfxEnabled);
     await p.setBool(kShowClock, showClock);
+    await p.setDouble(kPetScale, petScale);
   }
 }

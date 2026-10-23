@@ -41,6 +41,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _showClock = true;
   String _skinId = 'origin';
   String _customAvatarPath = '';
+  double _petScale = 0.85;
+
+  /// 主界面是否在前台。灵宠的台词只在前台（用户真看得见气泡、听得到声音）时播报：
+  /// 悬浮窗开着的时候用户已经回桌面了，主界面再跟着读一遍就是「两个语音同时读」。
+  bool _foreground = true;
+
+  /// 悬浮窗 → 主界面的事件订阅（破壳同步等）
+  StreamSubscription<dynamic>? _overlaySub;
+
+  /// 相位兜底轮询：通道消息丢了也能在 3 秒内对齐（只在蛋形态期间运行）
+  Timer? _phaseWatch;
 
   // 预览用的动作与表情
   String? _action;
@@ -69,25 +80,106 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// 主界面孵化期互动：里程碑倒计时 + 撒娇喊饿
+  ///
+  /// 三重闸门：蛋形态 + 主界面在前台 + 悬浮窗没在跑。
+  /// 前两个引擎都会跑同一套台词，只要同时出声就是「两个语音读文」；
+  /// 谁在桌面上说话由悬浮窗负责，它在跑时主界面一律静音。
   void _startHatchChatter() {
     _hatchTimer?.cancel();
-    HatchChatter.reset();
     if (_phase != SpiritPhase.egg) return;
-    Timer(const Duration(seconds: 2), () {
-      if (mounted && _phase == SpiritPhase.egg) {
-        _showEggBubble('主人，我在蛋里啦，5 分钟后破壳，记得喂我呀~', seconds: 4);
-        SpiritTts.speak('主人，我在蛋里啦，记得喂我呀');
+    if (!_canSpeak) return;
+    HatchChatter.reset();
+    Timer(const Duration(seconds: 2), () async {
+      if (!mounted || _phase != SpiritPhase.egg || !_canSpeak) return;
+      // 同一句开场白两个引擎都会念（先开 App、几秒后又点开悬浮窗），先说的那个占位
+      if (!await SpiritStore.claimLine('主人，我在蛋里啦，记得喂我呀',
+          windowSeconds: 90)) {
+        return;
       }
+      if (!mounted || _phase != SpiritPhase.egg || !_canSpeak) return;
+      _showEggBubble('主人，我在蛋里啦，5 分钟后破壳，记得喂我呀~', seconds: 4);
+      SpiritTts.speak('主人，我在蛋里啦，记得喂我呀');
     });
-    _hatchTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _hatchTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
       if (!mounted || _phase != SpiritPhase.egg) {
         _hatchTimer?.cancel();
         return;
       }
+      // 悬浮窗接管 / 切到后台时本轮静默，但不销毁定时器：
+      // 等它关掉或回到前台，还能接着把剩下的里程碑说完。
+      if (!_canSpeak) return;
       final line = HatchChatter.tick(SpiritStore.remainingSeconds());
-      if (line.isNotEmpty) {
-        _showEggBubble(line, seconds: 4);
-        SpiritTts.speak(line);
+      if (line.isEmpty) return;
+      // 里程碑文案两边一字不差，谁已经念过就让位（否则就是同一句被读两遍）
+      if (!await SpiritStore.claimLine(line)) return;
+      if (!mounted) return;
+      _showEggBubble(line, seconds: 4);
+      SpiritTts.speak(line);
+    });
+  }
+
+  /// 主界面能不能代表灵宠说话。
+  ///
+  /// 三个条件缺一不可：主界面在前台（用户看得见气泡、听得到声音）、内存里的悬浮窗
+  /// 状态是「关了」、磁盘心跳也过期了。两个引擎都会跑同一套孵化台词，
+  /// 只要同时出声就是用户听到的「两个语音读文」。
+  bool get _canSpeak =>
+      _foreground && !_overlayVisible && !SpiritStore.overlayAlive;
+
+  /// 悬浮窗（另一个引擎）里已经破壳：把相位同步过来，并且**不再出声**。
+  /// 破壳音效与问候已经由悬浮窗播过，这里跟着读一遍就是两路语音。
+  Future<void> _adoptHatchedFromOverlay() async {
+    if (_phase == SpiritPhase.spirit) return;
+    _hatchTimer?.cancel();
+    _phaseWatch?.cancel();
+    if (mounted) {
+      setState(() {
+        _phase = SpiritPhase.spirit;
+        _eggBubble = null;
+      });
+    } else {
+      _phase = SpiritPhase.spirit;
+    }
+    // 悬浮窗已经写过 SharedPreferences；这里只刷养成数值，让计数与桌面一致
+    await SpiritState.load(refresh: true);
+    if (mounted) setState(() {});
+  }
+
+  /// 悬浮窗 → 主界面的事件（破壳完成等）
+  void _onOverlayEvent(dynamic event) {
+    if (event == null) return;
+    bool hatch = false;
+    try {
+      dynamic m = event;
+      if (event is String) m = jsonDecode(event);
+      if (m is Map && m['hatchComplete'] == true) hatch = true;
+    } catch (_) {}
+    if (hatch) _adoptHatchedFromOverlay();
+  }
+
+  /// 相位兜底轮询：只在蛋形态期间跑，破壳后自己停掉。
+  /// 通道消息在个别 ROM 上可能丢，用户真机上就是「主界面一直停在蛋」。
+  void _startPhaseWatch() {
+    _phaseWatch?.cancel();
+    if (_phase != SpiritPhase.egg) return;
+    _phaseWatch = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (!mounted || _phase != SpiritPhase.egg) {
+        _phaseWatch?.cancel();
+        return;
+      }
+      final wasAlive = SpiritStore.overlayAlive;
+      final alive = await SpiritStore.refreshOverlayAlive();
+      final ph = await SpiritStore.loadFresh();
+      if (!mounted) return;
+      if (ph == SpiritPhase.spirit) {
+        await _adoptHatchedFromOverlay();
+        return;
+      }
+      if (wasAlive && !alive) {
+        // 桌面上的灵宠关了（可能是被系统杀掉，主界面这边并不知情）。
+        // 不把 _overlayVisible 一起放下来的话，主界面会一直哑着不出声。
+        if (mounted) setState(() => _overlayVisible = false);
+        _startHatchChatter();
       }
     });
   }
@@ -98,6 +190,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _checkPermission();
     _loadPhase();
+    // 悬浮窗是另一个引擎：它破壳后只会把相位写进 SharedPreferences 并广播一条
+    // hatchComplete。旧版主界面从不订阅 overlayListener，于是永远停在蛋形态、
+    // 继续读「快点点我」，与桌面上的问候语叠成两路语音。这里补上订阅。
+    try {
+      _overlaySub = FlutterOverlayWindow.overlayListener.listen(_onOverlayEvent);
+    } catch (_) {}
     SpiritState.load().then((_) {
       if (mounted) setState(() {});
     });
@@ -115,6 +213,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _showClock = SpiritConfig.showClock;
         _skinId = SpiritConfig.skinId;
         _customAvatarPath = SpiritConfig.customAvatarPath;
+        _petScale = SpiritConfig.petScale;
       });
     });
     // 启动就预热语音引擎：状态行能立刻反映引擎可用性（Android 11+ 少声明
@@ -130,32 +229,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _actionTimer?.cancel();
     _hatchTimer?.cancel();
     _eggBubbleTimer?.cancel();
+    _phaseWatch?.cancel();
+    _overlaySub?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 主界面与悬浮窗是两个独立引擎，悬浮窗破壳只写了 SharedPreferences，
-    // 主界面内存里的 phase 仍是蛋；切回前台时重新读取即可，不用重开软件。
-    if (state == AppLifecycleState.resumed) {
-      _loadPhase();
-      SpiritState.load().then((_) {
-        if (mounted) setState(() {});
-      });
+    _foreground = state == AppLifecycleState.resumed;
+    if (!_foreground) {
+      // 切后台立刻闭麦：蛋还没破时旧版会在后台继续每 10 秒读一句，
+      // 用户回到桌面听到的「幽灵语音」就是它。
+      _hatchTimer?.cancel();
+      return;
     }
+    // 主界面与悬浮窗是两个独立引擎。悬浮窗破壳只写 SharedPreferences，
+    // 且两边 Dart 缓存互不可见，必须 loadFresh（内部 reload）才读得到。
+    _loadPhase();
+    SpiritState.load(refresh: true).then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _loadPhase() async {
     await SpiritStore.ensureHatchTimer();
-    final ph = await SpiritStore.load();
+    final ph = await SpiritStore.loadFresh();
+    // 悬浮窗还在不在跑，决定这一轮台词由谁来说
+    await SpiritStore.refreshOverlayAlive();
     if (!mounted) return;
     setState(() {
       _phase = ph;
       _loaded = true;
+      // 这里必须**无条件**对齐磁盘心跳，不能只在「活着」时置 true：
+      // 悬浮窗在后台被系统杀掉的场景下沿用旧值，主界面就永远不敢开口。
+      _overlayVisible = SpiritStore.overlayAlive;
     });
-    if (ph == SpiritPhase.egg && SpiritStore.remainingSeconds() > 0) {
-      _startHatchChatter();
-    }
+    _startPhaseWatch();
+    _startHatchChatter();
   }
 
   Future<void> _checkPermission() async {
@@ -179,9 +289,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       granted = await FlutterOverlayWindow.isPermissionGranted();
     }
     try {
+      // 窗口尺寸按用户设置的大小缩放；悬浮窗引擎起来后还会自己校正一次 dp 规格
+      final sc = _petScale.clamp(0.6, 1.4).toDouble();
       await FlutterOverlayWindow.showOverlay(
-        height: 240,
-        width: 200,
+        height: (240 * sc).round(),
+        width: (200 * sc).round(),
         overlayTitle: kAppName,
         overlayContent: '灵宠悬浮窗',
         flag: OverlayFlag.defaultFlag,
@@ -212,14 +324,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _stop() async {
     await FlutterOverlayWindow.closeOverlay();
+    // 立刻清心跳：不用等 90 秒过期，主界面马上就能接着说话
+    await SpiritStore.markOverlayDead();
     if (!mounted) return;
     setState(() => _overlayVisible = false);
+    _startHatchChatter();
   }
 
   void _onHatchComplete() {
     _hatchTimer?.cancel();
+    _phaseWatch?.cancel();
     setState(() => _phase = SpiritPhase.spirit);
     SpiritStore.save(SpiritPhase.spirit);
+    // 悬浮窗引擎内存里还是蛋，必须显式通知，否则它会继续读孵化期台词（另一路语音）
+    OverlayActionChannel.send('hatchComplete');
+    // 破壳音效与问候只由「亲手点破壳」的那个引擎播一次。
+    // 这里是主界面点的壳，就由主界面出声；悬浮窗收到事件后只切相位、不重复出声。
+    if (!_foreground) return;
     SpiritSfx.play('hatch');
     final greeting = TimeAware.greeting();
     _showEggBubble(greeting, seconds: 4);
@@ -363,6 +484,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => _showClock = v);
     try {
       await FlutterOverlayWindow.shareData(jsonEncode({'showClock': v}));
+    } catch (_) {}
+  }
+
+  /// 大小缩放：拖动时只更新本地（预览立刻跟着变），松手才下发给悬浮窗，
+  /// 避免拖一次滑杆触发几十次原生 resize（原生 resize 是通道调用，拖拽中会卡）。
+  Future<void> _updatePetScale(double v) async {
+    SpiritConfig.petScale = v.clamp(0.6, 1.4).toDouble();
+    await SpiritConfig.save();
+    if (!mounted) return;
+    setState(() => _petScale = SpiritConfig.petScale);
+  }
+
+  Future<void> _pushPetScale() async {
+    try {
+      await FlutterOverlayWindow.shareData(
+          jsonEncode({'petScale': SpiritConfig.petScale}));
     } catch (_) {}
   }
 
@@ -661,7 +798,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   SpiritAvatar(
                     phase: _phase,
-                    size: 150,
+                    // 预览尺寸跟随「大小」设置，改完立刻能看出效果（上限防溢出）
+                    size: (150 * _petScale).clamp(90.0, 210.0).toDouble(),
                     evo: SpiritState.evo,
                     action: _action,
                     expression: _previewExpr,
@@ -749,6 +887,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           style: const TextStyle(
                               fontSize: 12, color: Colors.grey)),
                     ],
+                  ),
+                  Row(
+                    children: [
+                      const Text('大小', style: TextStyle(fontSize: 13)),
+                      Expanded(
+                        child: Slider(
+                          value: _petScale,
+                          min: 0.6,
+                          max: 1.4,
+                          divisions: 16,
+                          label: '${(_petScale * 100).round()}%',
+                          onChanged: _updatePetScale,
+                          onChangeEnd: (_) => _pushPetScale(),
+                        ),
+                      ),
+                      Text('${(_petScale * 100).round()}%',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.grey)),
+                    ],
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 4),
+                    child: Text(
+                      '蛋和精灵一起缩放（60%~140%），松手后回桌面看效果；'
+                      '觉得蛋太大就往左拉。',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
                   ),
                   _labelRow(
                     '闲置自动扒边缩头',
